@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: kira-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: ADMIN_COMMAND_USER_IDS
+        sync: false
+      - key: BOT_PREFIX
+        value: "!"
+      - key: DEV_GUILD_ID
+        sync: false
+
+# Add a Render persistent disk mounted at /opt/render/project/src/data
+# if admin-added filter words must survive redeploys. Without a disk,
+# local JSON changes are lost when Render replaces the service instance.
