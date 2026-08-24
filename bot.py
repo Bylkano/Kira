@@ -71,6 +71,7 @@ class Kira(commands.Bot):
 async def main() -> None:
     config.validate()
     store.init_db()
+    log.info("PostgreSQL schema is ready")
     start_health_server()
     async with Kira() as bot: await bot.start(config.DISCORD_TOKEN)
 
