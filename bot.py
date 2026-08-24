@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+import store
 
 COGS = ("cogs.automod", "cogs.moderation")
 log = logging.getLogger("kira")
@@ -21,8 +22,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-    def log_message(self, format: str, *args) -> None:
-        return
+    def log_message(self, format: str, *args) -> None: return
 
 def start_health_server() -> None:
     port = int(os.getenv("PORT", "10000"))
@@ -38,14 +38,12 @@ class Kira(commands.Bot):
         super().__init__(command_prefix=config.BOT_PREFIX, intents=intents, help_command=None)
 
     async def setup_hook(self) -> None:
-        for extension in COGS:
-            await self.load_extension(extension)
+        for extension in COGS: await self.load_extension(extension)
         if config.DEV_GUILD_ID:
             guild = discord.Object(id=config.DEV_GUILD_ID)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
-        else:
-            await self.tree.sync()
+        else: await self.tree.sync()
         log.info("Slash commands synced")
 
     async def on_ready(self) -> None:
@@ -72,6 +70,7 @@ class Kira(commands.Bot):
 
 async def main() -> None:
     config.validate()
+    store.init_db()
     start_health_server()
     async with Kira() as bot: await bot.start(config.DISCORD_TOKEN)
 
