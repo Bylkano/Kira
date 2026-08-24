@@ -1,88 +1,88 @@
-import json
-import os
-import tempfile
 import threading
-from pathlib import Path
-from typing import Any
 
-DATA_PATH = Path(os.getenv("KIRA_DATA_PATH", "data/kira_data.json"))
+import psycopg2
+
+import config
+
 _LOCK = threading.Lock()
-_DEFAULT: dict[str, Any] = {"guilds": {}}
 
 
-def _read() -> dict[str, Any]:
-    try:
-        with DATA_PATH.open(encoding="utf-8") as file:
-            data = json.load(file)
-        if not isinstance(data, dict) or not isinstance(data.get("guilds"), dict):
-            return {"guilds": {}}
-        return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"guilds": {}}
+def _connect():
+    if not config.DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
+    return psycopg2.connect(config.DATABASE_URL)
 
 
-def _write(data: dict[str, Any]) -> None:
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix="kira-", suffix=".json", dir=DATA_PATH.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=2)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_name, DATA_PATH)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
+def init_db() -> None:
+    """Create Kira's small persistence schema if it does not exist."""
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS kira_guilds (
+                    guild_id BIGINT PRIMARY KEY,
+                    automod_channel_id BIGINT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS kira_banned_words (
+                    guild_id BIGINT NOT NULL REFERENCES kira_guilds(guild_id) ON DELETE CASCADE,
+                    word TEXT NOT NULL,
+                    normalized_word TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, normalized_word)
+                )
+            """)
+        connection.commit()
 
 
-def _guild(data: dict[str, Any], guild_id: int) -> dict[str, Any]:
-    guilds = data.setdefault("guilds", {})
-    return guilds.setdefault(str(guild_id), {"automod_channel_id": None, "banned_words": []})
+def _ensure_guild(cursor, guild_id: int) -> None:
+    cursor.execute("INSERT INTO kira_guilds (guild_id) VALUES (%s) ON CONFLICT DO NOTHING", (guild_id,))
 
 
 def get_automod_channel(guild_id: int) -> int | None:
-    with _LOCK:
-        value = _guild(_read(), guild_id).get("automod_channel_id")
-        return int(value) if value else None
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("SELECT automod_channel_id FROM kira_guilds WHERE guild_id = %s", (guild_id,))
+            row = cursor.fetchone()
+        connection.commit()
+    return int(row[0]) if row and row[0] else None
 
 
 def set_automod_channel(guild_id: int, channel_id: int | None) -> None:
-    with _LOCK:
-        data = _read()
-        _guild(data, guild_id)["automod_channel_id"] = channel_id
-        _write(data)
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""INSERT INTO kira_guilds (guild_id, automod_channel_id) VALUES (%s, %s)
+                ON CONFLICT (guild_id) DO UPDATE SET automod_channel_id = EXCLUDED.automod_channel_id""", (guild_id, channel_id))
+        connection.commit()
 
 
 def get_banned_words(guild_id: int) -> list[str]:
-    with _LOCK:
-        words = _guild(_read(), guild_id).get("banned_words", [])
-        return [str(word) for word in words]
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("SELECT word FROM kira_banned_words WHERE guild_id = %s ORDER BY word", (guild_id,))
+            words = [row[0] for row in cursor.fetchall()]
+        connection.commit()
+    return words
 
 
 def add_banned_word(guild_id: int, word: str) -> bool:
     word = word.strip()
-    if not word:
-        return False
-    with _LOCK:
-        data = _read()
-        guild = _guild(data, guild_id)
-        words = guild.setdefault("banned_words", [])
-        if word.casefold() in {str(item).casefold() for item in words}:
-            return False
-        words.append(word)
-        _write(data)
-        return True
+    if not word: return False
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("""INSERT INTO kira_banned_words (guild_id, word, normalized_word)
+                VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""", (guild_id, word, word.casefold()))
+            added = cursor.rowcount == 1
+        connection.commit()
+    return added
 
 
 def remove_banned_word(guild_id: int, word: str) -> bool:
-    with _LOCK:
-        data = _read()
-        guild = _guild(data, guild_id)
-        words = guild.setdefault("banned_words", [])
-        for index, item in enumerate(words):
-            if str(item).casefold() == word.strip().casefold():
-                words.pop(index)
-                _write(data)
-                return True
-        return False
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM kira_banned_words WHERE guild_id = %s AND normalized_word = %s", (guild_id, word.strip().casefold()))
+            removed = cursor.rowcount == 1
+        connection.commit()
+    return removed
