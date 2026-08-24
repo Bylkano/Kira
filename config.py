@@ -29,8 +29,12 @@ def _admin_ids() -> set[int]:
 ADMIN_COMMAND_USER_IDS = _admin_ids()
 
 
-def can_use_admin_commands(user_id: int) -> bool:
-    return user_id in ADMIN_COMMAND_USER_IDS or (OWNER_ID is not None and user_id == OWNER_ID)
+def can_use_admin_commands(user_id: int, guild: object | None = None) -> bool:
+    """Allow configured users, the bot owner, or a Discord server administrator."""
+    if user_id in ADMIN_COMMAND_USER_IDS or (OWNER_ID is not None and user_id == OWNER_ID):
+        return True
+    member = getattr(guild, "get_member", lambda _id: None)(user_id) if guild else None
+    return bool(member and member.guild_permissions.administrator)
 
 
 def validate() -> None:
