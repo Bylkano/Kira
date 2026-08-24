@@ -20,7 +20,7 @@ class AutoMod(commands.Cog):
         self.warn_counts: dict[int, dict[int, int]] = defaultdict(dict)
 
     def _sensitive(self, interaction: discord.Interaction) -> bool:
-        return config.can_use_admin_commands(interaction.user.id)
+        return config.can_use_admin_commands(interaction.user.id, interaction.guild)
 
     async def _timeout(self, member: discord.Member, minutes: int, reason: str) -> None:
         try:
@@ -75,7 +75,7 @@ class AutoMod(commands.Cog):
     @app_commands.checks.has_permissions(manage_messages=True)
     async def addbadword(self, interaction: discord.Interaction, word: str) -> None:
         if not self._sensitive(interaction):
-            await interaction.response.send_message("You are not on the admin command allowlist.", ephemeral=True); return
+            await interaction.response.send_message("You need to be a server administrator, the bot owner, or an approved admin to use this command.", ephemeral=True); return
         added = store.add_banned_word(interaction.guild_id, word)
         await interaction.response.send_message(f"Added `{word.strip()}` to the filter." if added else "That word is already filtered or empty.", ephemeral=True)
 
