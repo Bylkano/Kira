@@ -305,7 +305,7 @@ class ColorMenuView(discord.ui.View):
         async def callback(interaction: discord.Interaction) -> None:
             await interaction.response.defer()
             if self.mode == "solid": self.pending = {"color_type": "solid", "color_primary": value, "color_secondary": None}; self.mode = "confirm"
-            elif self.mode == "gradient_first": self.pending["color_primary"] = value; self.mode = "gradient_second"
+            elif self.mode == "gradient_first": self.pending["color_primary"] = value; self.pending["color_type"] = "gradient"; self.mode = "gradient_second"
             else: self.pending["color_secondary"] = value; self.pending["color_type"] = "gradient"; self.mode = "confirm"
             self.rebuild(); await self.message.edit(embed=self.embed(), view=self)
         return callback
@@ -329,6 +329,9 @@ class ColorMenuView(discord.ui.View):
             try: message = await self.cog.bot.wait_for("message", timeout=120, check=lambda item: item.author.id == self.user.id and item.guild and item.guild.id == self.user.guild.id and self.mode == "icon_prompt")
             except asyncio.TimeoutError: await self.on_timeout(); return
             parsed = parse_custom_emoji(message.content)
+            if parsed and parsed["animated"]:
+                if self.message: await self.message.edit(content="Animated emojis cannot be role icons. Paste a static custom emoji in <:name:id> format, or use Back.", embed=self.embed(), view=self)
+                continue
             if not parsed:
                 if self.message: await self.message.edit(content="That is not a static custom emoji. Paste it in <:name:id> format, or use Back.", embed=self.embed(), view=self)
                 continue
@@ -344,9 +347,13 @@ class ColorMenuView(discord.ui.View):
         elif self.pending.get("action") == "icon": ok, text = await self.cog._apply_icon(self.user, {"id": self.pending["icon_emoji_id"], "name": self.pending["icon_emoji_name"], "animated": self.pending["icon_animated"]})
         elif self.pending.get("color_type") == "gradient": ok, text = await self.cog._apply_color(self.user, "gradient", self.pending["color_primary"], self.pending["color_secondary"])
         else: ok, text = await self.cog._apply_color(self.user, "solid", self.pending["color_primary"], None)
-        self.pending = {}; self.mode = "expired"; self.rebuild()
-        for child in self.children: child.disabled = True
+        if ok:
+            self.pending = {}
+            self.mode = "expired"
+        self.rebuild()
         final = self.embed(); final.title = "Your color is set!" if ok else "Color change failed"; final.description = f"{text}\n\n" + final.description; final.color = discord.Color.green() if ok else discord.Color.red()
+        if ok:
+            for child in self.children: child.disabled = True
         await self.message.edit(content=None, embed=final, view=self)
         if ok: self.stop()
 
