@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime
 
 import psycopg2
 
@@ -14,7 +15,7 @@ def _connect():
 
 
 def init_db() -> None:
-    """Create Kira's small persistence schema if it does not exist."""
+    """Create Kira's persistence schema if it does not exist."""
     with _LOCK, _connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute("""
@@ -29,6 +30,21 @@ def init_db() -> None:
                     word TEXT NOT NULL,
                     normalized_word TEXT NOT NULL,
                     PRIMARY KEY (guild_id, normalized_word)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS kira_booster_roles (
+                    guild_id BIGINT NOT NULL REFERENCES kira_guilds(guild_id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    role_id BIGINT NOT NULL,
+                    color_type TEXT NOT NULL CHECK (color_type IN ('solid', 'gradient')),
+                    color_primary TEXT NOT NULL,
+                    color_secondary TEXT,
+                    icon_emoji_id BIGINT,
+                    icon_emoji_name TEXT,
+                    icon_animated BOOLEAN,
+                    boosting_stopped_at TIMESTAMPTZ,
+                    PRIMARY KEY (guild_id, user_id)
                 )
             """)
         connection.commit()
@@ -86,3 +102,73 @@ def remove_banned_word(guild_id: int, word: str) -> bool:
             removed = cursor.rowcount == 1
         connection.commit()
     return removed
+
+
+def _booster_row(row) -> dict | None:
+    if not row: return None
+    keys = ("guild_id", "user_id", "role_id", "color_type", "color_primary", "color_secondary", "icon_emoji_id", "icon_emoji_name", "icon_animated", "boosting_stopped_at")
+    return dict(zip(keys, row))
+
+
+def get_booster_role(guild_id: int, user_id: int) -> dict | None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT guild_id, user_id, role_id, color_type, color_primary, color_secondary,
+                icon_emoji_id, icon_emoji_name, icon_animated, boosting_stopped_at
+                FROM kira_booster_roles WHERE guild_id = %s AND user_id = %s""", (guild_id, user_id))
+            row = cursor.fetchone()
+    return _booster_row(row)
+
+
+def upsert_booster_role(guild_id: int, user_id: int, role_id: int, color_type: str, color_primary: str,
+                        color_secondary: str | None = None, icon_emoji_id: int | None = None,
+                        icon_emoji_name: str | None = None, icon_animated: bool | None = None) -> None:
+    if color_type not in {"solid", "gradient"}: raise ValueError("color_type must be solid or gradient")
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("""INSERT INTO kira_booster_roles
+                (guild_id, user_id, role_id, color_type, color_primary, color_secondary,
+                 icon_emoji_id, icon_emoji_name, icon_animated, boosting_stopped_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                  role_id = EXCLUDED.role_id, color_type = EXCLUDED.color_type,
+                  color_primary = EXCLUDED.color_primary, color_secondary = EXCLUDED.color_secondary,
+                  icon_emoji_id = EXCLUDED.icon_emoji_id, icon_emoji_name = EXCLUDED.icon_emoji_name,
+                  icon_animated = EXCLUDED.icon_animated, boosting_stopped_at = NULL""",
+                (guild_id, user_id, role_id, color_type, color_primary, color_secondary,
+                 icon_emoji_id, icon_emoji_name, icon_animated))
+        connection.commit()
+
+
+def mark_boosting_stopped(guild_id: int, user_id: int) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""UPDATE kira_booster_roles SET boosting_stopped_at = COALESCE(boosting_stopped_at, NOW())
+                WHERE guild_id = %s AND user_id = %s""", (guild_id, user_id))
+        connection.commit()
+
+
+def clear_boosting_stopped(guild_id: int, user_id: int) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE kira_booster_roles SET boosting_stopped_at = NULL WHERE guild_id = %s AND user_id = %s", (guild_id, user_id))
+        connection.commit()
+
+
+def get_expired_booster_roles(days: int = 3) -> list[dict]:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT guild_id, user_id, role_id, color_type, color_primary, color_secondary,
+                icon_emoji_id, icon_emoji_name, icon_animated, boosting_stopped_at
+                FROM kira_booster_roles
+                WHERE boosting_stopped_at IS NOT NULL AND boosting_stopped_at < NOW() - (%s * INTERVAL '1 day')""", (days,))
+            rows = cursor.fetchall()
+    return [_booster_row(row) for row in rows]
+
+
+def delete_booster_role(guild_id: int, user_id: int) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM kira_booster_roles WHERE guild_id = %s AND user_id = %s", (guild_id, user_id))
+        connection.commit()
