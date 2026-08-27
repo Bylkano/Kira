@@ -47,6 +47,15 @@ def init_db() -> None:
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS kira_booster_role_shares (
+                    guild_id BIGINT NOT NULL,
+                    owner_id BIGINT NOT NULL,
+                    member_id BIGINT NOT NULL,
+                    PRIMARY KEY (guild_id, owner_id, member_id),
+                    FOREIGN KEY (guild_id, owner_id) REFERENCES kira_booster_roles (guild_id, user_id) ON DELETE CASCADE
+                )
+            """)
         connection.commit()
 
 
@@ -171,4 +180,51 @@ def delete_booster_role(guild_id: int, user_id: int) -> None:
     with _LOCK, _connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM kira_booster_roles WHERE guild_id = %s AND user_id = %s", (guild_id, user_id))
+        connection.commit()
+
+
+SHARE_LIMIT = 2
+
+
+def get_role_shares(guild_id: int, owner_id: int) -> list[int]:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT member_id FROM kira_booster_role_shares
+                WHERE guild_id = %s AND owner_id = %s ORDER BY member_id""", (guild_id, owner_id))
+            rows = cursor.fetchall()
+    return [int(row[0]) for row in rows]
+
+
+def add_role_share(guild_id: int, owner_id: int, member_id: int) -> tuple[bool, str]:
+    if owner_id == member_id: return False, "You already have your own booster role."
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM kira_booster_roles WHERE guild_id = %s AND user_id = %s", (guild_id, owner_id))
+            if cursor.fetchone() is None: return False, "Create your booster role first from the menu."
+            cursor.execute("""SELECT member_id FROM kira_booster_role_shares
+                WHERE guild_id = %s AND owner_id = %s""", (guild_id, owner_id))
+            current = [int(row[0]) for row in cursor.fetchall()]
+            if member_id in current: return False, "That member already has your booster role. Remove them first if you want to add someone else."
+            if len(current) >= SHARE_LIMIT:
+                return False, f"You can share your booster role with {SHARE_LIMIT} members at most. Remove someone first to add them back or share with someone else."
+            cursor.execute("""INSERT INTO kira_booster_role_shares (guild_id, owner_id, member_id)
+                VALUES (%s, %s, %s)""", (guild_id, owner_id, member_id))
+        connection.commit()
+    return True, "ok"
+
+
+def remove_role_share(guild_id: int, owner_id: int, member_id: int) -> bool:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""DELETE FROM kira_booster_role_shares
+                WHERE guild_id = %s AND owner_id = %s AND member_id = %s""", (guild_id, owner_id, member_id))
+            removed = cursor.rowcount == 1
+        connection.commit()
+    return removed
+
+
+def delete_shares_for_member(guild_id: int, member_id: int) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM kira_booster_role_shares WHERE guild_id = %s AND member_id = %s", (guild_id, member_id))
         connection.commit()

@@ -201,6 +201,46 @@ class BoosterRoles(commands.Cog):
         store.delete_booster_role(member.guild.id, member.id)
         return True, "Your booster role was deleted."
 
+    async def _share_add(self, owner: discord.Member, target: discord.Member) -> tuple[bool, str]:
+        if target.bot: return False, "You cannot share your booster role with a bot."
+        if target.id == owner.id: return False, "You already have your own booster role."
+        role, _record = self._existing_role(owner.guild, owner)
+        if not role: return False, "Create your booster role first from the menu."
+        ok, message = store.add_role_share(owner.guild.id, owner.id, target.id)
+        if not ok: return False, message
+        error = await self._add_role(target, role)
+        if error:
+            store.remove_role_share(owner.guild.id, owner.id, target.id)
+            return False, error
+        remaining = store.SHARE_LIMIT - len(store.get_role_shares(owner.guild.id, owner.id))
+        extra = f" You can share with {remaining} more member{'s' if remaining != 1 else ''}." if remaining else " You are at the 2-member limit."
+        return True, f"Shared **{role.name}** with **{target.display_name}**.{extra}"
+
+    async def _share_remove(self, owner: discord.Member, target_id: int) -> tuple[bool, str]:
+        role, _record = self._existing_role(owner.guild, owner)
+        if not store.remove_role_share(owner.guild.id, owner.id, target_id):
+            return False, "That member does not have your shared booster role."
+        target = owner.guild.get_member(target_id)
+        if role and target and role in target.roles:
+            try:
+                await target.remove_roles(role, reason=f"Remove shared Kira booster role for {owner} ({owner.id})")
+            except discord.Forbidden: log.warning("Missing permission to remove shared booster role from %s", target_id)
+            except discord.HTTPException as exc:
+                if exc.status == 429: log.warning("Rate limited while removing shared booster role")
+                else: log.warning("Could not remove shared booster role from %s: %s", target_id, exc)
+        name = target.display_name if target else f"user {target_id}"
+        role_name = role.name if role else "your booster role"
+        return True, f"Removed **{role_name}** from **{name}**. You can add them back later."
+
+    def _share_names(self, member: discord.Member) -> str:
+        share_ids = store.get_role_shares(member.guild.id, member.id)
+        if not share_ids: return f"nobody (0/{store.SHARE_LIMIT})"
+        names = []
+        for user_id in share_ids:
+            shared = member.guild.get_member(user_id)
+            names.append(shared.display_name if shared else f"user {user_id}")
+        return f"{', '.join(names)} ({len(share_ids)}/{store.SHARE_LIMIT})"
+
     def _preview_embed(self, member: discord.Member, record: dict | None, pending: dict | None = None, title: str = "Booster role menu") -> discord.Embed:
         state = dict(record or {})
         if pending: state.update(pending)
@@ -212,6 +252,7 @@ class BoosterRoles(commands.Cog):
         description = f"**{member.display_name}**\nRole: **{role.name}**" if role else f"**{member.display_name}**\nRole: not created yet"
         description += f"\n\nColor: {primary}" if color_type == "solid" else f"\n\nGradient: {primary} → {secondary}"
         description += f"\nIcon: {emoji_markup(icon)}"
+        if role: description += f"\nShared with: {self._share_names(member)}"
         embed = discord.Embed(title=title, description=description, color=discord.Color(parsed[1]))
         embed.set_footer(text="Your personal role has no permissions.")
         return embed
@@ -248,6 +289,10 @@ class BoosterRoles(commands.Cog):
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
         if before.premium_since and not after.premium_since: store.mark_boosting_stopped(after.guild.id, after.id)
         elif not before.premium_since and after.premium_since: store.clear_boosting_stopped(after.guild.id, after.id)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        store.delete_shares_for_member(member.guild.id, member.id)
 
 
 class HexModal(discord.ui.Modal):
@@ -318,6 +363,7 @@ class ColorMenuView(discord.ui.View):
         title = "Booster role menu"
         if self.mode == "gradient_second": title = "Choose the second gradient color"
         elif self.mode == "icon_prompt": title = "Set a custom emoji icon"
+        elif self.mode == "share": title = "Share your booster role"
         elif self.mode == "confirm": title = "Delete this booster role?" if self.pending.get("action") == "remove" else "Review your change"
         elif self.mode == "expired": title = "Booster role menu expired"
         embed = self.cog._preview_embed(self.user, record, self.pending, title)
@@ -326,7 +372,8 @@ class ColorMenuView(discord.ui.View):
         elif self.status_ok is False: embed.color = discord.Color.red()
         if self.mode == "gradient_first": embed.description += "\n\nChoose the first gradient color."
         if self.mode == "gradient_second": embed.description += "\n\nFirst color selected. Choose the second color."
-        if self.mode == "root": embed.description += "\n\nCreate or rename your role, delete it, or customize its color and icon."
+        if self.mode == "root": embed.description += "\n\nCreate or rename your role, delete it, share it with up to 2 members, or customize its color and icon."
+        if self.mode == "share": embed.description += "\n\nAdd a member to share your role, or remove someone so you can add them back later."
         return embed
 
     def rebuild(self) -> None:
@@ -336,11 +383,25 @@ class ColorMenuView(discord.ui.View):
                 discord.SelectOption(label="Create Role", value="create", description="Create your booster role and choose its name"),
                 discord.SelectOption(label="Rename Role", value="rename", description="Change the name of your booster role"),
                 discord.SelectOption(label="Delete Role", value="delete", description="Remove your personal booster role"),
+                discord.SelectOption(label="Share Role", value="share", description="Share with up to 2 members; add or remove them"),
                 discord.SelectOption(label="Solid Color", value="solid", description="Pick one color"),
                 discord.SelectOption(label="Gradient", value="gradient", description="Blend two colors; Level 3"),
                 discord.SelectOption(label="Set Icon", value="icon", description="Use a static custom emoji"),
             ])
             select.callback = self.choose; self.add_item(select); return
+        if self.mode == "share":
+            share_ids = store.get_role_shares(self.user.guild.id, self.user.id)
+            if len(share_ids) < store.SHARE_LIMIT:
+                picker = discord.ui.UserSelect(placeholder="Add a member to share with", min_values=1, max_values=1, row=0)
+                picker.callback = self.share_add; self.add_item(picker)
+            if share_ids:
+                options = []
+                for user_id in share_ids:
+                    shared = self.user.guild.get_member(user_id)
+                    options.append(discord.SelectOption(label=(shared.display_name if shared else f"User {user_id}")[:100], value=str(user_id), description="Remove this member; you can add them back later"))
+                remover = discord.ui.Select(placeholder="Remove a member", options=options, min_values=1, max_values=1, row=1)
+                remover.callback = self.share_remove; self.add_item(remover)
+            back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, row=4); back.callback = self.back; self.add_item(back); return
         if self.mode in {"solid", "gradient_first", "gradient_second"}:
             for index, (label, value) in enumerate(PRESETS):
                 button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=index // 5); button.callback = self._preset_callback(value); self.add_item(button)
@@ -376,12 +437,13 @@ class ColorMenuView(discord.ui.View):
                 self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
             await interaction.response.send_modal(RoleNameModal(self, "rename")); return
         await interaction.response.defer()
-        if choice in {"delete", "solid", "gradient", "icon"} and not role:
-            self.set_status("Create your booster role first, then you can customize or delete it.", False)
+        if choice in {"delete", "solid", "gradient", "icon", "share"} and not role:
+            self.set_status("Create your booster role first, then you can customize, share, or delete it.", False)
             self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
         self.set_status(None)
         if choice == "solid": self.mode = "solid"
         elif choice == "gradient": self.mode = "gradient_first"
+        elif choice == "share": self.mode = "share"
         elif choice == "icon":
             self.mode = "icon_prompt"; self.rebuild()
             await self.message.edit(content="Paste a static custom emoji in the chat, for example <:sparkles:123456789012345678>. Unicode emoji and attachments are not supported. I will show a preview before applying it.", embed=self.embed(), view=self)
@@ -405,6 +467,37 @@ class ColorMenuView(discord.ui.View):
                 continue
             self.pending = {"action": "icon", "icon_emoji_id": parsed["id"], "icon_emoji_name": parsed["name"], "icon_animated": parsed["animated"]}; self.mode = "confirm"; self.rebuild()
             if self.message: await self.message.edit(content=f"Emoji received: {emoji_markup(parsed)}. Review the preview, then confirm.", embed=self.embed(), view=self)
+
+    async def share_add(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        chosen = interaction.data.get("values", [None])[0] if interaction.data else None
+        if not chosen:
+            self.set_status("Choose a member to share with.", False)
+            self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
+        try: target_id = int(chosen)
+        except (TypeError, ValueError):
+            self.set_status("That member could not be used.", False)
+            self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
+        target = self.user.guild.get_member(target_id)
+        if not target:
+            try: target = await self.user.guild.fetch_member(target_id)
+            except discord.HTTPException:
+                self.set_status("That member is not in this server.", False)
+                self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
+        ok, text = await self.cog._share_add(self.user, target)
+        self.mode = "share"; self.set_status(text, ok); self.rebuild()
+        await self.message.edit(content=None, embed=self.embed(), view=self)
+
+    async def share_remove(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        chosen = interaction.data.get("values", [None])[0] if interaction.data else None
+        try: target_id = int(chosen)
+        except (TypeError, ValueError):
+            self.set_status("Choose a member to remove.", False)
+            self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
+        ok, text = await self.cog._share_remove(self.user, target_id)
+        self.mode = "share"; self.set_status(text, ok); self.rebuild()
+        await self.message.edit(content=None, embed=self.embed(), view=self)
 
     async def back(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(); self.pending = {}; self.mode = "root"; self.set_status(None); self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self)
