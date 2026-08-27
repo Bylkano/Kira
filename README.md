@@ -6,8 +6,8 @@ Kira is a focused Discord moderation bot built with Python 3.11+ and discord.py 
 
 - Per-server, admin-configurable banned words and phrases
 - Automatic message deletion with escalating timeouts
-- Booster custom roles with solid colors, Level 3 gradients, and static custom emoji icons
-- Visual /color menu with presets, custom hex colors, preview, confirm, and back controls
+- Booster custom roles with a chosen name, solid colors, Level 3 gradients, and static custom emoji icons
+- Visual /boosterole menu for boosters and administrators: create, rename, delete, color, and icon
 - Booster roles are automatically removed after three days without boosting
 - Channel lock/unlock with audit reasons and embeds
 - Automatic PostgreSQL table initialization at startup
@@ -43,14 +43,11 @@ DEV_GUILD_ID is optional and makes slash commands sync immediately to one develo
 
 ### Booster roles
 
-- /color menu — visual customization flow with presets and live preview
-- /color solid hex_code — fast solid color shortcut
-- /color gradient hex1 hex2 — fast gradient shortcut; requires Boost Level 3
-- /color icon emoji — paste a static custom emoji such as <:sparkles:123456789012345678>
-- /color preview
-- /color remove
+- /boosterole menu — booster role menu for boosters and server administrators
 
-All /color commands require the user to currently be boosting the server. The bot needs Manage Roles, and its highest role must be above the server booster role and all personal color roles. Role icons require the server's ROLE_ICONS feature. Animated and Unicode emoji are not accepted as role icons.
+From the menu you can create a personal role and type its name, rename it, delete it, pick a solid color or Level 3 gradient, and set a static custom emoji icon.
+
+The bot needs Manage Roles, and its highest role must be above the server booster role and all personal color roles. Role icons require the server's ROLE_ICONS feature. Animated and Unicode emoji are not accepted as role icons.
 
 ## Deploy on Render
 
