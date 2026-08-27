@@ -11,7 +11,7 @@ from discord.ext import commands
 import config
 import store
 
-COGS = ("cogs.automod", "cogs.moderation", "cogs.booster_roles", "cogs.boosters")
+COGS = ("cogs.automod", "cogs.moderation", "cogs.booster_roles")
 log = logging.getLogger("kira")
 
 class HealthHandler(BaseHTTPRequestHandler):

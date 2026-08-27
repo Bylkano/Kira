@@ -8,7 +8,6 @@ Kira is a focused Discord moderation bot built with Python 3.11+ and discord.py 
 - Automatic message deletion with escalating timeouts
 - Booster custom roles with a chosen name, solid colors, Level 3 gradients, and static custom emoji icons
 - Visual /boosterole menu for boosters and administrators: create, rename, delete, color, and icon
-- /boosters tracker for who is boosting, since when, duration, and server boost totals
 - Booster roles are automatically removed after three days without boosting
 - Channel lock/unlock with audit reasons and embeds
 - Automatic PostgreSQL table initialization at startup
@@ -42,13 +41,6 @@ DEV_GUILD_ID is optional and makes slash commands sync immediately to one develo
 - /lock channel reason
 - /unlock channel reason
 
-### Boosters
-
-- /boosters — server boost level, total boosts, current boosters with start date and duration
-- /boosters member — the same details for one member, including boost history if they stopped
-
-Discord does not expose how many boosts a specific person applied. Kira shows duration from Discord and a lower-bound boost count from boost announcements it has seen.
-
 ### Booster roles
 
 - /boosterole menu — booster role menu for boosters and server administrators
@@ -61,7 +53,7 @@ New booster roles are placed directly under a role named Jailed. The bot needs M
 
 1. Open your Render PostgreSQL database and copy its Internal Database URL. Use the Internal URL when the database and web service are in the same Render region.
 2. Open the Kira web service's Environment settings and add DATABASE_URL with that URL. Also add DISCORD_TOKEN, OWNER_ID, and ADMIN_COMMAND_USER_IDS.
-3. Deploy or trigger a manual redeploy. Kira creates the kira_guilds, kira_banned_words, kira_booster_roles, and kira_boosters tables automatically at startup.
+3. Deploy or trigger a manual redeploy. Kira creates the kira_guilds, kira_banned_words, and kira_booster_roles tables automatically at startup.
 4. Confirm the logs show the health server, PostgreSQL schema initialization, and a Discord login.
 
 Do not commit database URLs or bot tokens. Kira does not use Replit hosting, Replit DB, or Replit deployment configuration.
