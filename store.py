@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg2
 
@@ -44,6 +44,17 @@ def init_db() -> None:
                     icon_emoji_name TEXT,
                     icon_animated BOOLEAN,
                     boosting_stopped_at TIMESTAMPTZ,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS kira_boosters (
+                    guild_id BIGINT NOT NULL REFERENCES kira_guilds(guild_id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    boosting_since TIMESTAMPTZ NOT NULL,
+                    boosting_stopped_at TIMESTAMPTZ,
+                    boost_count INTEGER NOT NULL DEFAULT 1 CHECK (boost_count >= 1),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
@@ -171,4 +182,97 @@ def delete_booster_role(guild_id: int, user_id: int) -> None:
     with _LOCK, _connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM kira_booster_roles WHERE guild_id = %s AND user_id = %s", (guild_id, user_id))
+        connection.commit()
+
+
+def _boost_tracker_row(row) -> dict | None:
+    if not row: return None
+    keys = ("guild_id", "user_id", "boosting_since", "boosting_stopped_at", "boost_count")
+    return dict(zip(keys, row))
+
+
+def record_boost_start(guild_id: int, user_id: int, boosting_since: datetime) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("""INSERT INTO kira_boosters
+                (guild_id, user_id, boosting_since, boosting_stopped_at, boost_count, last_seen_at)
+                VALUES (%s, %s, %s, NULL, 1, NOW())
+                ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                  boosting_since = COALESCE(EXCLUDED.boosting_since, kira_boosters.boosting_since),
+                  boosting_stopped_at = NULL,
+                  boost_count = CASE
+                    WHEN kira_boosters.boosting_stopped_at IS NOT NULL THEN 1
+                    ELSE GREATEST(kira_boosters.boost_count, 1)
+                  END,
+                  last_seen_at = NOW()""", (guild_id, user_id, boosting_since))
+        connection.commit()
+
+
+def mark_boost_stopped(guild_id: int, user_id: int) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""UPDATE kira_boosters SET boosting_stopped_at = COALESCE(boosting_stopped_at, NOW()), last_seen_at = NOW()
+                WHERE guild_id = %s AND user_id = %s AND boosting_stopped_at IS NULL""", (guild_id, user_id))
+        connection.commit()
+
+
+def increment_boost_count(guild_id: int, user_id: int, boosting_since: datetime | None = None) -> None:
+    started = boosting_since or datetime.now(timezone.utc)
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("""INSERT INTO kira_boosters
+                (guild_id, user_id, boosting_since, boosting_stopped_at, boost_count, last_seen_at)
+                VALUES (%s, %s, %s, NULL, 1, NOW())
+                ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                  boosting_since = COALESCE(kira_boosters.boosting_since, EXCLUDED.boosting_since),
+                  boosting_stopped_at = NULL,
+                  boost_count = CASE
+                    WHEN kira_boosters.boosting_stopped_at IS NOT NULL THEN 1
+                    ELSE kira_boosters.boost_count + 1
+                  END,
+                  last_seen_at = NOW()""", (guild_id, user_id, started))
+        connection.commit()
+
+
+def get_boost_tracker(guild_id: int, user_id: int) -> dict | None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT guild_id, user_id, boosting_since, boosting_stopped_at, boost_count
+                FROM kira_boosters WHERE guild_id = %s AND user_id = %s""", (guild_id, user_id))
+            row = cursor.fetchone()
+    return _boost_tracker_row(row)
+
+
+def get_active_boost_trackers(guild_id: int) -> list[dict]:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT guild_id, user_id, boosting_since, boosting_stopped_at, boost_count
+                FROM kira_boosters WHERE guild_id = %s AND boosting_stopped_at IS NULL
+                ORDER BY boosting_since""", (guild_id,))
+            rows = cursor.fetchall()
+    return [_boost_tracker_row(row) for row in rows]
+
+
+def get_stopped_boost_trackers(guild_id: int, limit: int = 10) -> list[dict]:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT guild_id, user_id, boosting_since, boosting_stopped_at, boost_count
+                FROM kira_boosters WHERE guild_id = %s AND boosting_stopped_at IS NOT NULL
+                ORDER BY boosting_stopped_at DESC LIMIT %s""", (guild_id, limit))
+            rows = cursor.fetchall()
+    return [_boost_tracker_row(row) for row in rows]
+
+
+def mark_missing_boosters_stopped(guild_id: int, active_user_ids: list[int]) -> None:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            if active_user_ids:
+                cursor.execute("""UPDATE kira_boosters SET boosting_stopped_at = NOW(), last_seen_at = NOW()
+                    WHERE guild_id = %s AND boosting_stopped_at IS NULL AND NOT (user_id = ANY(%s))""",
+                    (guild_id, active_user_ids))
+            else:
+                cursor.execute("""UPDATE kira_boosters SET boosting_stopped_at = NOW(), last_seen_at = NOW()
+                    WHERE guild_id = %s AND boosting_stopped_at IS NULL""", (guild_id,))
         connection.commit()
