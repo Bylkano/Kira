@@ -75,16 +75,25 @@ class BoosterRoles(commands.Cog):
             return None, None
         return role, record
 
+    @staticmethod
+    def _jailed_role(guild: discord.Guild) -> discord.Role | None:
+        matches = [role for role in guild.roles if role.name.casefold() == "jailed"]
+        return max(matches, key=lambda role: role.position) if matches else None
+
     async def _position_role(self, guild: discord.Guild, role: discord.Role) -> str | None:
-        booster_role = guild.premium_subscriber_role
-        if not booster_role: return None
+        jailed = self._jailed_role(guild)
+        if not jailed: return "I could not find a role named Jailed. Create that role, or rename your jail role to Jailed, so I can place booster roles under it."
+        top = guild.me.top_role if guild.me else None
+        if not top or jailed >= top: return "Move my highest role above Jailed so I can place booster roles under it."
         try:
-            await role.edit(position=booster_role.position + 1, reason="Position Kira booster role above the server booster role")
+            await role.move(above=jailed, reason="Position Kira booster role under the Jailed role")
             return None
-        except discord.Forbidden: return "I need Manage Roles, and my highest role must be above the server booster role."
+        except discord.Forbidden: return "I need Manage Roles, and my highest role must be above Jailed and the new booster role."
         except discord.HTTPException as exc:
             if exc.status == 429: log.warning("Rate limited while positioning booster role"); return "Discord is rate-limiting role changes. Please try again shortly."
             log.warning("Could not position booster role: %s", exc); return "Discord rejected the booster role change."
+        except ValueError:
+            return "I could not place that booster role under Jailed."
 
     async def _add_role(self, member: discord.Member, role: discord.Role) -> str | None:
         try:
@@ -100,7 +109,7 @@ class BoosterRoles(commands.Cog):
         if role: return False, f"You already have a booster role named **{role.name}**. Use Rename to change it."
         try:
             role = await member.guild.create_role(name=name, permissions=discord.Permissions.none(), mentionable=False, hoist=False, reason=f"Kira booster role for {member} ({member.id})")
-        except discord.Forbidden: return False, "I need Manage Roles, and my highest role must be above the server booster role."
+        except discord.Forbidden: return False, "I need Manage Roles, and my highest role must be above Jailed."
         except discord.HTTPException as exc:
             if exc.status == 429: log.warning("Rate limited while creating booster role"); return False, "Discord is rate-limiting role changes. Please try again shortly."
             log.warning("Could not create booster role: %s", exc); return False, "Discord rejected the booster role change."

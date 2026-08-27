@@ -47,7 +47,7 @@ DEV_GUILD_ID is optional and makes slash commands sync immediately to one develo
 
 From the menu you can create a personal role and type its name, rename it, delete it, pick a solid color or Level 3 gradient, and set a static custom emoji icon.
 
-The bot needs Manage Roles, and its highest role must be above the server booster role and all personal color roles. Role icons require the server's ROLE_ICONS feature. Animated and Unicode emoji are not accepted as role icons.
+New booster roles are placed directly under a role named Jailed. The bot needs Manage Roles, and its highest role must be above Jailed and all personal color roles. Role icons require the server's ROLE_ICONS feature. Animated and Unicode emoji are not accepted as role icons.
 
 ## Deploy on Render
 
