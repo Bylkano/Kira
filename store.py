@@ -43,6 +43,14 @@ def init_db() -> None:
                 )
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS kira_slur_words (
+                    guild_id BIGINT NOT NULL REFERENCES kira_guilds(guild_id) ON DELETE CASCADE,
+                    word TEXT NOT NULL,
+                    normalized_word TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, normalized_word)
+                )
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS kira_booster_roles (
                     guild_id BIGINT NOT NULL REFERENCES kira_guilds(guild_id) ON DELETE CASCADE,
                     user_id BIGINT NOT NULL,
@@ -118,6 +126,38 @@ def remove_banned_word(guild_id: int, word: str) -> bool:
     with _LOCK, _connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM kira_banned_words WHERE guild_id = %s AND normalized_word = %s", (guild_id, word.strip().casefold()))
+            removed = cursor.rowcount == 1
+        connection.commit()
+    return removed
+
+
+def get_slur_words(guild_id: int) -> list[str]:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("SELECT word FROM kira_slur_words WHERE guild_id = %s ORDER BY word", (guild_id,))
+            words = [row[0] for row in cursor.fetchall()]
+        connection.commit()
+    return words
+
+
+def add_slur_word(guild_id: int, word: str) -> bool:
+    word = word.strip()
+    if not word: return False
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            _ensure_guild(cursor, guild_id)
+            cursor.execute("""INSERT INTO kira_slur_words (guild_id, word, normalized_word)
+                VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""", (guild_id, word, word.casefold()))
+            added = cursor.rowcount == 1
+        connection.commit()
+    return added
+
+
+def remove_slur_word(guild_id: int, word: str) -> bool:
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM kira_slur_words WHERE guild_id = %s AND normalized_word = %s", (guild_id, word.strip().casefold()))
             removed = cursor.rowcount == 1
         connection.commit()
     return removed
