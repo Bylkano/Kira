@@ -4,7 +4,7 @@ Kira is a focused Discord moderation bot built with Python 3.11+ and discord.py 
 
 ## Features
 
-- Per-server, admin-configurable banned words and phrases
+- Per-server, admin-configurable banned words and phrases (exact whole-word matches only)
 - Automatic message deletion with escalating timeouts
 - Booster custom roles with a chosen name, solid colors, Level 3 gradients, and static custom emoji icons
 - Visual /boosterole menu for boosters and administrators: create, rename, delete, share with up to 2 members, color, and icon

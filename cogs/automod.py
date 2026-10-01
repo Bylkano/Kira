@@ -1,5 +1,6 @@
 import datetime
 import logging
+import re
 from collections import defaultdict
 
 import discord
@@ -13,6 +14,13 @@ log = logging.getLogger("kira.automod")
 MAX_WARNS = 3
 SHORT_TIMEOUT_MINUTES = 5
 MAX_TIMEOUT_MINUTES = 30
+
+
+def contains_exact_phrase(content: str, phrase: str) -> bool:
+    """Return True only when phrase appears as a whole word/phrase, not a substring."""
+    pattern = rf"(?<!\w){re.escape(phrase.casefold())}(?!\w)"
+    return re.search(pattern, content.casefold()) is not None
+
 
 class AutoMod(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -44,7 +52,7 @@ class AutoMod(commands.Cog):
         channel_id = store.get_automod_channel(message.guild.id)
         if channel_id and message.channel.id != channel_id: return
         words = store.get_banned_words(message.guild.id)
-        matched = next((word for word in words if word.casefold() in message.content.casefold()), None)
+        matched = next((word for word in words if contains_exact_phrase(message.content, word)), None)
         if matched is None: return
         try:
             await message.delete()
