@@ -179,6 +179,17 @@ def get_booster_role(guild_id: int, user_id: int) -> dict | None:
     return _booster_row(row)
 
 
+def get_guild_booster_roles(guild_id: int) -> dict[int, dict]:
+    """Return user_id -> booster role record for every Kira custom role in the guild."""
+    with _LOCK, _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""SELECT guild_id, user_id, role_id, color_type, color_primary, color_secondary,
+                icon_emoji_id, icon_emoji_name, icon_animated, boosting_stopped_at
+                FROM kira_booster_roles WHERE guild_id = %s""", (guild_id,))
+            rows = cursor.fetchall()
+    return {int(row[1]): _booster_row(row) for row in rows}
+
+
 def upsert_booster_role(guild_id: int, user_id: int, role_id: int, color_type: str, color_primary: str,
                         color_secondary: str | None = None, icon_emoji_id: int | None = None,
                         icon_emoji_name: str | None = None, icon_animated: bool | None = None) -> None:
