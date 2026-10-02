@@ -17,6 +17,8 @@ CUSTOM_EMOJI_RE = re.compile(r"^<(a?):([A-Za-z0-9_]+):(\d+)>$")
 PRESETS = (("Ruby", "#EF4444"), ("Coral", "#F97316"), ("Amber", "#F59E0B"), ("Lime", "#84CC16"), ("Emerald", "#10B981"), ("Teal", "#14B8A6"), ("Sky", "#0EA5E9"), ("Blue", "#3B82F6"), ("Indigo", "#6366F1"), ("Violet", "#8B5CF6"), ("Fuchsia", "#D946EF"), ("Pink", "#EC4899"), ("Rose", "#F43F5E"), ("Gold", "#EAB308"), ("Mint", "#2DD4BF"), ("Cyan", "#06B6D4"), ("Lavender", "#A78BFA"), ("Slate", "#64748B"), ("White", "#F8FAFC"), ("Black", "#111827"))
 ROLE_ICON_FEATURE = "ROLE_ICONS"
 DEFAULT_COLOR = "#5865F2"
+BOOSTER_ROLE_ANCHOR_NAME = "---------------------"
+SERVER_BOOSTER_ROLE_NAME = "Server Booster ・₊ ✫ ˚・"
 
 
 def parse_hex(value: str) -> tuple[str, int] | None:
@@ -76,24 +78,37 @@ class BoosterRoles(commands.Cog):
         return role, record
 
     @staticmethod
-    def _jailed_role(guild: discord.Guild) -> discord.Role | None:
-        matches = [role for role in guild.roles if role.name.casefold() == "jailed"]
+    def _anchor_role(guild: discord.Guild) -> discord.Role | None:
+        matches = [role for role in guild.roles if role.name == BOOSTER_ROLE_ANCHOR_NAME]
+        return max(matches, key=lambda role: role.position) if matches else None
+
+    @staticmethod
+    def _server_booster_role(guild: discord.Guild) -> discord.Role | None:
+        if guild.premium_subscriber_role is not None:
+            return guild.premium_subscriber_role
+        matches = [role for role in guild.roles if role.name == SERVER_BOOSTER_ROLE_NAME]
         return max(matches, key=lambda role: role.position) if matches else None
 
     async def _position_role(self, guild: discord.Guild, role: discord.Role) -> str | None:
-        jailed = self._jailed_role(guild)
-        if not jailed: return "I could not find a role named Jailed. Create that role, or rename your jail role to Jailed, so I can place booster roles under it."
+        anchor = self._anchor_role(guild)
+        if not anchor:
+            return f"I could not find a role named `{BOOSTER_ROLE_ANCHOR_NAME}`. Create that separator role so I can place booster roles under it."
         top = guild.me.top_role if guild.me else None
-        if not top or jailed >= top: return "Move my highest role above Jailed so I can place booster roles under it."
+        if not top or anchor >= top:
+            return f"Move my highest role above `{BOOSTER_ROLE_ANCHOR_NAME}` so I can place booster roles under it."
         try:
-            await role.move(above=jailed, reason="Position Kira booster role under the Jailed role")
+            await role.move(below=anchor, reason=f"Position Kira booster role under {BOOSTER_ROLE_ANCHOR_NAME}")
             return None
-        except discord.Forbidden: return "I need Manage Roles, and my highest role must be above Jailed and the new booster role."
+        except discord.Forbidden:
+            return f"I need Manage Roles, and my highest role must be above `{BOOSTER_ROLE_ANCHOR_NAME}` and the new booster role."
         except discord.HTTPException as exc:
-            if exc.status == 429: log.warning("Rate limited while positioning booster role"); return "Discord is rate-limiting role changes. Please try again shortly."
-            log.warning("Could not position booster role: %s", exc); return "Discord rejected the booster role change."
+            if exc.status == 429:
+                log.warning("Rate limited while positioning booster role")
+                return "Discord is rate-limiting role changes. Please try again shortly."
+            log.warning("Could not position booster role: %s", exc)
+            return "Discord rejected the booster role change."
         except ValueError:
-            return "I could not place that booster role under Jailed."
+            return f"I could not place that booster role under `{BOOSTER_ROLE_ANCHOR_NAME}`."
 
     async def _add_role(self, member: discord.Member, role: discord.Role) -> str | None:
         try:
@@ -109,7 +124,8 @@ class BoosterRoles(commands.Cog):
         if role: return False, f"You already have a booster role named **{role.name}**. Use Rename to change it."
         try:
             role = await member.guild.create_role(name=name, permissions=discord.Permissions.none(), mentionable=False, hoist=False, reason=f"Kira booster role for {member} ({member.id})")
-        except discord.Forbidden: return False, "I need Manage Roles, and my highest role must be above Jailed."
+        except discord.Forbidden:
+            return False, f"I need Manage Roles, and my highest role must be above `{BOOSTER_ROLE_ANCHOR_NAME}`."
         except discord.HTTPException as exc:
             if exc.status == 429: log.warning("Rate limited while creating booster role"); return False, "Discord is rate-limiting role changes. Please try again shortly."
             log.warning("Could not create booster role: %s", exc); return False, "Discord rejected the booster role change."
@@ -264,6 +280,73 @@ class BoosterRoles(commands.Cog):
         view = ColorMenuView(self, interaction.user)
         await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
         view.message = await interaction.original_response()
+
+    @app_commands.command(name="boosterslist", description="List current server boosters and their Kira custom roles.")
+    @app_commands.guild_only()
+    async def boosterslist(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        if not guild.chunked:
+            try:
+                await guild.chunk(cache=True)
+            except discord.HTTPException as exc:
+                log.warning("Could not chunk members for boosterslist: %s", exc)
+
+        booster_role = self._server_booster_role(guild)
+        if booster_role is None:
+            await interaction.followup.send(
+                f"I could not find the server booster role (`{SERVER_BOOSTER_ROLE_NAME}`).",
+                ephemeral=True,
+            )
+            return
+
+        boosters = sorted(booster_role.members, key=lambda member: member.display_name.casefold())
+        custom_by_user = store.get_guild_booster_roles(guild.id)
+        if not boosters:
+            await interaction.followup.send("There are no current server boosters.", ephemeral=True)
+            return
+
+        lines: list[str] = []
+        for member in boosters:
+            record = custom_by_user.get(member.id)
+            custom_role = guild.get_role(record["role_id"]) if record else None
+            if record and not custom_role:
+                store.delete_booster_role(guild.id, member.id)
+                custom_role = None
+            custom_text = f"**{custom_role.name}**" if custom_role else "_no Kira custom role_"
+            lines.append(f"• {member.mention} — {custom_text}")
+
+        embeds: list[discord.Embed] = []
+        chunk: list[str] = []
+        current_len = 0
+        for line in lines:
+            # Leave room for title/footer; Discord embed description max is 4096.
+            if chunk and current_len + len(line) + 1 > 3800:
+                embed = discord.Embed(
+                    title=f"Server boosters ({len(boosters)})",
+                    description="\n".join(chunk),
+                    color=discord.Color.blurple(),
+                )
+                embed.set_footer(text=f"Booster role: {booster_role.name}")
+                embeds.append(embed)
+                chunk = []
+                current_len = 0
+            chunk.append(line)
+            current_len += len(line) + 1
+        if chunk:
+            embed = discord.Embed(
+                title=f"Server boosters ({len(boosters)})" if not embeds else "Server boosters (continued)",
+                description="\n".join(chunk),
+                color=discord.Color.blurple(),
+            )
+            embed.set_footer(text=f"Booster role: {booster_role.name}")
+            embeds.append(embed)
+
+        await interaction.followup.send(embeds=embeds[:10], ephemeral=True)
 
     @tasks.loop(hours=1)
     async def cleanup_expired(self) -> None:
