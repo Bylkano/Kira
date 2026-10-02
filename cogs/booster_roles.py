@@ -64,6 +64,22 @@ class BoosterRoles(commands.Cog):
     def _is_admin(self, interaction: discord.Interaction) -> bool:
         return config.can_use_admin_commands(interaction.user.id, interaction.guild)
 
+    def _is_staff(self, interaction: discord.Interaction) -> bool:
+        """Admins, approved command users, or members with common staff permissions."""
+        if self._is_admin(interaction):
+            return True
+        if not isinstance(interaction.user, discord.Member):
+            return False
+        perms = interaction.user.guild_permissions
+        return bool(
+            perms.manage_guild
+            or perms.manage_roles
+            or perms.manage_messages
+            or perms.kick_members
+            or perms.ban_members
+            or perms.moderate_members
+        )
+
     async def _require_access(self, interaction: discord.Interaction) -> bool:
         if self._is_booster(interaction) or self._is_admin(interaction): return True
         await interaction.response.send_message(embed=discord.Embed(title="Access required", description="You need to be boosting this server, or be a server administrator, to use the booster role menu.", color=discord.Color.red()), ephemeral=True)
@@ -283,7 +299,15 @@ class BoosterRoles(commands.Cog):
 
     @app_commands.command(name="boosterslist", description="List current server boosters and their Kira custom roles.")
     @app_commands.guild_only()
+    @app_commands.default_permissions(manage_roles=True)
     async def boosterslist(self, interaction: discord.Interaction) -> None:
+        if not self._is_staff(interaction):
+            await interaction.response.send_message(
+                "Only server admins and staff can use this command.",
+                ephemeral=True,
+            )
+            return
+
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
