@@ -49,7 +49,7 @@ DEV_GUILD_ID is optional and makes slash commands sync immediately to one develo
 ### Booster roles
 
 - /boosterole menu — booster role menu for boosters and server administrators
-- /boosterslist — list current server boosters and their Kira custom roles
+- /boosterslist — list current server boosters and their Kira custom roles (admins/staff only)
 
 From the menu you can create a personal role and type its name, rename it, delete it, share it with up to 2 members (and remove or add them back), pick a solid color or Level 3 gradient, and set a static custom emoji icon.
 
