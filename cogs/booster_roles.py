@@ -18,7 +18,19 @@ PRESETS = (("Ruby", "#EF4444"), ("Coral", "#F97316"), ("Amber", "#F59E0B"), ("Li
 ROLE_ICON_FEATURE = "ROLE_ICONS"
 DEFAULT_COLOR = "#5865F2"
 BOOSTER_ROLE_ANCHOR_NAME = "---------------------"
+# Match common dash/separator glyphs so slight copy differences still find the anchor.
+_SEPARATOR_CHARS = frozenset("-─━—–‒―₋−")
 SERVER_BOOSTER_ROLE_NAME = "Server Booster ・₊ ✫ ˚・"
+
+
+def _is_separator_role_name(name: str) -> bool:
+    stripped = name.strip()
+    if not stripped:
+        return False
+    if stripped == BOOSTER_ROLE_ANCHOR_NAME:
+        return True
+    # Roles that are only dashes/lines (length 3+) count as the booster separator.
+    return len(stripped) >= 3 and all(char in _SEPARATOR_CHARS for char in stripped)
 
 
 def parse_hex(value: str) -> tuple[str, int] | None:
@@ -95,7 +107,11 @@ class BoosterRoles(commands.Cog):
 
     @staticmethod
     def _anchor_role(guild: discord.Guild) -> discord.Role | None:
-        matches = [role for role in guild.roles if role.name == BOOSTER_ROLE_ANCHOR_NAME]
+        # Prefer the exact configured name, then any dash-only separator role.
+        exact = [role for role in guild.roles if role.name.strip() == BOOSTER_ROLE_ANCHOR_NAME]
+        if exact:
+            return max(exact, key=lambda role: role.position)
+        matches = [role for role in guild.roles if _is_separator_role_name(role.name)]
         return max(matches, key=lambda role: role.position) if matches else None
 
     @staticmethod
@@ -113,7 +129,12 @@ class BoosterRoles(commands.Cog):
         if not top or anchor >= top:
             return f"Move my highest role above `{BOOSTER_ROLE_ANCHOR_NAME}` so I can place booster roles under it."
         try:
-            await role.move(below=anchor, reason=f"Position Kira booster role under {BOOSTER_ROLE_ANCHOR_NAME}")
+            # discord.py: above=X means "X should be above this role" → place under the separator.
+            await role.move(above=anchor, reason=f"Position Kira booster role under {anchor.name}")
+            log.info(
+                "Positioned booster role %s (%s) under separator %s (%s) at position %s",
+                role.name, role.id, anchor.name, anchor.id, role.position,
+            )
             return None
         except discord.Forbidden:
             return f"I need Manage Roles, and my highest role must be above `{BOOSTER_ROLE_ANCHOR_NAME}` and the new booster role."
