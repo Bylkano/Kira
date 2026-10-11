@@ -65,9 +65,19 @@ def normalize_role_name(value: str) -> str | None:
 class BoosterRoles(commands.Cog):
     boosterole = app_commands.Group(name="boosterole", description="Booster role menu")
 
-    def __init__(self, bot: commands.Bot) -> None: self.bot = bot
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        # Pending share invites: (guild_id, owner_id, target_id)
+        self.pending_shares: set[tuple[int, int, int]] = set()
+
     async def cog_load(self) -> None: self.cleanup_expired.start()
     def cog_unload(self) -> None: self.cleanup_expired.cancel()
+
+    def _pending_share_count(self, guild_id: int, owner_id: int) -> int:
+        return sum(1 for g, o, _t in self.pending_shares if g == guild_id and o == owner_id)
+
+    def _clear_pending_share(self, guild_id: int, owner_id: int, target_id: int) -> None:
+        self.pending_shares.discard((guild_id, owner_id, target_id))
 
     def _is_booster(self, interaction: discord.Interaction) -> bool:
         booster_role = interaction.guild.premium_subscriber_role if interaction.guild else None
@@ -254,20 +264,60 @@ class BoosterRoles(commands.Cog):
         store.delete_booster_role(member.guild.id, member.id)
         return True, "Your booster role was deleted."
 
-    async def _share_add(self, owner: discord.Member, target: discord.Member) -> tuple[bool, str]:
+    async def _share_add(
+        self,
+        owner: discord.Member,
+        target: discord.Member,
+        channel: discord.abc.Messageable | None,
+    ) -> tuple[bool, str]:
         if target.bot: return False, "You cannot share your booster role with a bot."
         if target.id == owner.id: return False, "You already have your own booster role."
+        if channel is None: return False, "I could not find a channel to send the share confirmation."
         role, _record = self._existing_role(owner.guild, owner)
         if not role: return False, "Create your booster role first from the menu."
-        ok, message = store.add_role_share(owner.guild.id, owner.id, target.id)
-        if not ok: return False, message
-        error = await self._add_role(target, role)
-        if error:
-            store.remove_role_share(owner.guild.id, owner.id, target.id)
-            return False, error
-        remaining = store.SHARE_LIMIT - len(store.get_role_shares(owner.guild.id, owner.id))
-        extra = f" You can share with {remaining} more member{'s' if remaining != 1 else ''}." if remaining else " You are at the 2-member limit."
-        return True, f"Shared **{role.name}** with **{target.display_name}**.{extra}"
+        current = store.get_role_shares(owner.guild.id, owner.id)
+        if target.id in current:
+            return False, "That member already has your booster role. Remove them first if you want to add someone else."
+        pending_key = (owner.guild.id, owner.id, target.id)
+        if pending_key in self.pending_shares:
+            return False, f"There is already a pending share invite for **{target.display_name}**."
+        used = len(current) + self._pending_share_count(owner.guild.id, owner.id)
+        if used >= store.SHARE_LIMIT:
+            return False, (
+                f"You can share your booster role with {store.SHARE_LIMIT} members at most. "
+                "Remove someone or wait for a pending invite to finish first."
+            )
+
+        embed = discord.Embed(
+            title="Booster role share invite",
+            description=(
+                f"{target.mention}, {owner.mention} wants to share their booster role "
+                f"**{role.name}** with you.\n\nAccept to receive the role, or decline."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Only the invited member can respond. This invite expires in 5 minutes.")
+        view = ShareInviteView(self, owner.guild.id, owner.id, target.id, role.id, role.name)
+        try:
+            message = await channel.send(content=target.mention, embed=embed, view=view)
+        except discord.Forbidden:
+            return False, "I could not post a confirmation in this channel. Check my Send Messages permission."
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                log.warning("Rate limited while sending share invite")
+                return False, "Discord is rate-limiting messages. Please try again shortly."
+            log.warning("Could not send share invite: %s", exc)
+            return False, "Discord rejected the share confirmation message."
+
+        view.message = message
+        self.pending_shares.add(pending_key)
+        remaining = store.SHARE_LIMIT - used - 1
+        extra = (
+            f" You can still invite {remaining} more member{'s' if remaining != 1 else ''}."
+            if remaining > 0
+            else " That uses your last share slot until they respond or you remove someone."
+        )
+        return True, f"Asked **{target.display_name}** to accept **{role.name}** in this channel.{extra}"
 
     async def _share_remove(self, owner: discord.Member, target_id: int) -> tuple[bool, str]:
         role, _record = self._existing_role(owner.guild, owner)
@@ -421,6 +471,139 @@ class BoosterRoles(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         store.delete_shares_for_member(member.guild.id, member.id)
+        self.pending_shares = {
+            key for key in self.pending_shares
+            if not (key[0] == member.guild.id and (key[1] == member.id or key[2] == member.id))
+        }
+
+
+class ShareInviteView(discord.ui.View):
+    """Public Accept/Decline confirmation for a booster role share invite."""
+
+    def __init__(
+        self,
+        cog: BoosterRoles,
+        guild_id: int,
+        owner_id: int,
+        target_id: int,
+        role_id: int,
+        role_name: str,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.owner_id = owner_id
+        self.target_id = target_id
+        self.role_id = role_id
+        self.role_name = role_name
+        self.message: discord.Message | None = None
+        self.resolved = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.target_id:
+            await interaction.response.send_message(
+                "Only the invited member can accept or decline this share.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _clear_pending(self) -> None:
+        self.cog._clear_pending_share(self.guild_id, self.owner_id, self.target_id)
+
+    async def _finish(self, interaction: discord.Interaction, content: str, embed: discord.Embed) -> None:
+        self.resolved = True
+        self._clear_pending()
+        self.stop()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.response.edit_message(content=content, embed=embed, view=self)
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.resolved:
+            await interaction.response.send_message("This invite was already handled.", ephemeral=True)
+            return
+        guild = interaction.guild
+        if guild is None or guild.id != self.guild_id:
+            await interaction.response.send_message("This invite is no longer valid here.", ephemeral=True)
+            return
+
+        owner = guild.get_member(self.owner_id)
+        target = guild.get_member(self.target_id) or interaction.user
+        if not isinstance(target, discord.Member):
+            await interaction.response.send_message("You must be a server member to accept.", ephemeral=True)
+            return
+        if owner is None:
+            embed = discord.Embed(
+                title="Share invite expired",
+                description=f"Could not find the booster who offered **{self.role_name}**.",
+                color=discord.Color.dark_grey(),
+            )
+            await self._finish(interaction, target.mention, embed)
+            return
+
+        role = guild.get_role(self.role_id)
+        if role is None:
+            embed = discord.Embed(
+                title="Share invite expired",
+                description=f"**{owner.display_name}**'s booster role no longer exists.",
+                color=discord.Color.dark_grey(),
+            )
+            await self._finish(interaction, target.mention, embed)
+            return
+
+        ok, message = store.add_role_share(guild.id, owner.id, target.id)
+        if not ok:
+            embed = discord.Embed(title="Could not share role", description=message, color=discord.Color.red())
+            await self._finish(interaction, target.mention, embed)
+            return
+
+        error = await self.cog._add_role(target, role)
+        if error:
+            store.remove_role_share(guild.id, owner.id, target.id)
+            embed = discord.Embed(title="Could not assign role", description=error, color=discord.Color.red())
+            await self._finish(interaction, target.mention, embed)
+            return
+
+        embed = discord.Embed(
+            title="Share accepted",
+            description=f"{target.mention} accepted **{role.name}** from {owner.mention}.",
+            color=discord.Color.green(),
+        )
+        await self._finish(interaction, f"{target.mention} {owner.mention}", embed)
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self.resolved:
+            await interaction.response.send_message("This invite was already handled.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="Share declined",
+            description=f"{interaction.user.mention} declined the **{self.role_name}** share invite.",
+            color=discord.Color.red(),
+        )
+        await self._finish(interaction, interaction.user.mention, embed)
+
+    async def on_timeout(self) -> None:
+        if self.resolved:
+            return
+        self._clear_pending()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message is None:
+            return
+        embed = discord.Embed(
+            title="Share invite expired",
+            description=f"The invite to share **{self.role_name}** expired with no response.",
+            color=discord.Color.dark_grey(),
+        )
+        try:
+            await self.message.edit(content=None, embed=embed, view=self)
+        except discord.HTTPException:
+            pass
 
 
 class HexModal(discord.ui.Modal):
@@ -501,7 +684,11 @@ class ColorMenuView(discord.ui.View):
         if self.mode == "gradient_first": embed.description += "\n\nChoose the first gradient color."
         if self.mode == "gradient_second": embed.description += "\n\nFirst color selected. Choose the second color."
         if self.mode == "root": embed.description += "\n\nCreate or rename your role, delete it, share it with up to 2 members, or customize its color and icon."
-        if self.mode == "share": embed.description += "\n\nAdd a member to share your role, or remove someone so you can add them back later."
+        if self.mode == "share":
+            embed.description += (
+                "\n\nAdd a member to share your role — they will get a confirmation in this channel "
+                "and only receive the role if they accept. Remove someone so you can add them back later."
+            )
         return embed
 
     def rebuild(self) -> None:
@@ -612,7 +799,7 @@ class ColorMenuView(discord.ui.View):
             except discord.HTTPException:
                 self.set_status("That member is not in this server.", False)
                 self.rebuild(); await self.message.edit(content=None, embed=self.embed(), view=self); return
-        ok, text = await self.cog._share_add(self.user, target)
+        ok, text = await self.cog._share_add(self.user, target, interaction.channel)
         self.mode = "share"; self.set_status(text, ok); self.rebuild()
         await self.message.edit(content=None, embed=self.embed(), view=self)
 
