@@ -6,6 +6,7 @@ Kira is a focused Discord moderation bot built with Python 3.11+ and discord.py 
 
 - Per-server, admin-configurable banned words and phrases (exact whole-word matches only; limited to an optional automod channel)
 - Separate server-wide slur filter via /addslurwords (exact whole-word matches in every channel)
+- Harassment antispam for low-level / Members-only accounts: multi-ping + trigger names/cheat words → delete, 1-week timeout, and a public reply; repeat same-context ping spam is also caught
 - Automatic message deletion with escalating timeouts
 - Booster custom roles with a chosen name, solid colors, Level 3 gradients, and static custom emoji icons
 - Visual /boosterole menu for boosters and administrators: create, rename, delete, share with up to 2 members, color, and icon
