@@ -1,6 +1,7 @@
 import datetime
 import logging
 import re
+import time
 from collections import defaultdict
 
 import discord
@@ -15,6 +16,14 @@ MAX_WARNS = 3
 SHORT_TIMEOUT_MINUTES = 5
 MAX_TIMEOUT_MINUTES = 30
 
+ANTISPAM_REPLY = "SHUT UP NO ONE CARES LOSER!"
+ANTISPAM_TIMEOUT_DAYS = 7
+ANTISPAM_FALLBACK_WINDOW_SECONDS = 180
+ANTISPAM_NAME_WORDS = ("bylka", "bylkas", "kindly", "ismael", "sonny")
+CHEAT_WORD_RE = re.compile(r"(?<!\w)cheat\w*(?!\w)", re.IGNORECASE)
+LVL1_ROLE_RE = re.compile(r"\blvl\s*1\b", re.IGNORECASE)
+MENTION_RE = re.compile(r"<@!?(\d+)>")
+
 
 def contains_exact_phrase(content: str, phrase: str) -> bool:
     """Return True only when phrase appears as a whole word/phrase, not a substring."""
@@ -22,10 +31,46 @@ def contains_exact_phrase(content: str, phrase: str) -> bool:
     return re.search(pattern, content.casefold()) is not None
 
 
+def normalize_antispam_context(content: str) -> str:
+    """Strip mentions/pings so we can compare message wording."""
+    text = MENTION_RE.sub(" ", content)
+    text = re.sub(r"<@&\d+>", " ", text)
+    text = re.sub(r"@everyone|@here", " ", text, flags=re.IGNORECASE)
+    return " ".join(text.casefold().split())
+
+
+def has_antispam_trigger_words(content: str) -> bool:
+    if any(contains_exact_phrase(content, word) for word in ANTISPAM_NAME_WORDS):
+        return True
+    return CHEAT_WORD_RE.search(content) is not None
+
+
+def is_antispam_role_target(member: discord.Member) -> bool:
+    """True for lvl 1, Members-only, or Members + roles that never include 'lvl'."""
+    if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
+        return False
+    roles = [role for role in member.roles if not role.is_default()]
+    if not roles:
+        return False
+    names = [role.name.casefold() for role in roles]
+    if any(LVL1_ROLE_RE.search(role.name) for role in roles):
+        return True
+    if "members" not in names:
+        return False
+    other_names = [name for name in names if name != "members"]
+    if not other_names:
+        return True
+    return not any("lvl" in name for name in other_names)
+
+
 class AutoMod(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.warn_counts: dict[int, dict[int, int]] = defaultdict(dict)
+        # guild_id -> user_id -> list[(mention_ids, context, timestamp)]
+        self._antispam_recent: dict[int, dict[int, list[tuple[frozenset[int], str, float]]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
 
     def _sensitive(self, interaction: discord.Interaction) -> bool:
         return config.can_use_admin_commands(interaction.user.id, interaction.guild)
@@ -33,6 +78,14 @@ class AutoMod(commands.Cog):
     async def _timeout(self, member: discord.Member, minutes: int, reason: str) -> None:
         try:
             await member.timeout(datetime.timedelta(minutes=minutes), reason=reason)
+        except discord.HTTPException as exc:
+            if exc.status == 429: log.warning("Rate limited while timing out %s", member.id)
+            else: log.warning("Could not timeout %s: %s", member.id, exc)
+        except discord.Forbidden: log.warning("Missing permission to timeout %s", member.id)
+
+    async def _timeout_days(self, member: discord.Member, days: int, reason: str) -> None:
+        try:
+            await member.timeout(datetime.timedelta(days=days), reason=reason)
         except discord.HTTPException as exc:
             if exc.status == 429: log.warning("Rate limited while timing out %s", member.id)
             else: log.warning("Could not timeout %s: %s", member.id, exc)
@@ -72,9 +125,96 @@ class AutoMod(commands.Cog):
         embed.add_field(name="Timeout", value=f"{minutes} minutes")
         await self._dm(message.author, embed)
 
+    def _prune_antispam_recent(self, guild_id: int, user_id: int) -> None:
+        cutoff = time.monotonic() - ANTISPAM_FALLBACK_WINDOW_SECONDS
+        recent = self._antispam_recent[guild_id][user_id]
+        self._antispam_recent[guild_id][user_id] = [item for item in recent if item[2] >= cutoff]
+
+    def _remember_antispam_message(self, guild_id: int, user_id: int, pings: frozenset[int], context: str) -> None:
+        self._prune_antispam_recent(guild_id, user_id)
+        recent = self._antispam_recent[guild_id][user_id]
+        recent.append((pings, context, time.monotonic()))
+        del recent[:-8]
+
+    def _antispam_fallback_match(self, guild_id: int, user_id: int, pings: frozenset[int], context: str) -> bool:
+        if not context:
+            return False
+        self._prune_antispam_recent(guild_id, user_id)
+        for prev_pings, prev_context, _ts in self._antispam_recent[guild_id][user_id]:
+            if prev_context != context:
+                continue
+            same_pings = bool(prev_pings) and prev_pings == pings
+            multi_ping = len(pings) > 1
+            if same_pings or multi_ping:
+                return True
+        return False
+
+    async def _antispam_punish(self, message: discord.Message, reason: str) -> bool:
+        deleted = False
+        try:
+            await message.delete()
+            deleted = True
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                log.warning("Rate limited while deleting an antispam message")
+            else:
+                log.warning("Could not delete antispam message: %s", exc)
+        except discord.Forbidden:
+            log.warning("Missing permission to delete antispam message in guild %s", message.guild.id)
+
+        if isinstance(message.author, discord.Member):
+            await self._timeout_days(
+                message.author,
+                ANTISPAM_TIMEOUT_DAYS,
+                f"Automatic antispam: {reason}",
+            )
+
+        try:
+            await message.channel.send(ANTISPAM_REPLY)
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                log.warning("Rate limited while sending antispam reply")
+            else:
+                log.warning("Could not send antispam reply: %s", exc)
+        except discord.Forbidden:
+            log.warning("Missing permission to send antispam reply in guild %s", message.guild.id)
+
+        self._antispam_recent[message.guild.id].pop(message.author.id, None)
+        return deleted
+
+    async def _check_antispam(self, message: discord.Message) -> bool:
+        """Return True when antispam handled the message (caller should stop)."""
+        if not message.guild:
+            return False
+        author = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        if author is None or not is_antispam_role_target(author):
+            return False
+
+        pings = frozenset(user.id for user in message.mentions)
+        context = normalize_antispam_context(message.content)
+        multi_ping = len(pings) > 1
+
+        if multi_ping and has_antispam_trigger_words(message.content):
+            await self._antispam_punish(message, "multi-ping harassment phrase")
+            return True
+
+        # Fallback: primary conditions did not fire; catch repeat same-context ping spam.
+        if self._antispam_fallback_match(message.guild.id, author.id, pings, context):
+            if multi_ping or pings:
+                await self._antispam_punish(message, "repeat multi-ping spam")
+                return True
+
+        if multi_ping or pings:
+            self._remember_antispam_message(message.guild.id, author.id, pings, context)
+        return False
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild or not message.content: return
+
+        # Harassment antispam: role-gated, server-wide.
+        if await self._check_antispam(message):
+            return
 
         # Slur filter: exact match, every channel in the server.
         slur_words = store.get_slur_words(message.guild.id)
