@@ -56,12 +56,13 @@ def is_members_role_name(name: str) -> bool:
     return label in {"members", "member"}
 
 
-def collect_message_pings(message: discord.Message) -> frozenset[str]:
-    """Collect user + role pings (and @everyone/@here). Role pings count the same as user pings."""
-    pings: set[str] = {f"user:{user.id}" for user in message.mentions}
-    pings.update(f"role:{role.id}" for role in message.role_mentions)
+def collect_role_pings(message: discord.Message) -> frozenset[str]:
+    """Collect role mass-pings used in raids (raffle/activity/etc), plus @everyone/@here.
+
+    Individual user @mentions are ignored on purpose — raids ping roles to notify many members.
+    """
+    pings: set[str] = {f"role:{role.id}" for role in message.role_mentions}
     # Raw content backup in case Discord omits some resolved mention objects.
-    pings.update(f"user:{user_id}" for user_id in USER_MENTION_RE.findall(message.content))
     pings.update(f"role:{role_id}" for role_id in ROLE_MENTION_RE.findall(message.content))
     if message.mention_everyone:
         lowered = message.content.casefold()
@@ -219,21 +220,21 @@ class AutoMod(commands.Cog):
         if author is None or not is_antispam_role_target(author):
             return False
 
-        pings = collect_message_pings(message)
+        pings = collect_role_pings(message)
         context = normalize_antispam_context(message.content)
-        multi_ping = len(pings) > 1
+        multi_role_ping = len(pings) > 1
 
-        if multi_ping and has_antispam_trigger_words(message.content):
-            await self._antispam_punish(message, "multi-ping harassment phrase")
+        if multi_role_ping and has_antispam_trigger_words(message.content):
+            await self._antispam_punish(message, "multi role-ping harassment phrase")
             return True
 
-        # Fallback: primary conditions did not fire; catch repeat same-context ping spam.
+        # Fallback: primary conditions did not fire; catch repeat same-context role-ping spam.
         if self._antispam_fallback_match(message.guild.id, author.id, pings, context):
-            if multi_ping or pings:
-                await self._antispam_punish(message, "repeat multi-ping spam")
+            if multi_role_ping or pings:
+                await self._antispam_punish(message, "repeat multi role-ping spam")
                 return True
 
-        if multi_ping or pings:
+        if multi_role_ping or pings:
             self._remember_antispam_message(message.guild.id, author.id, pings, context)
         return False
 
