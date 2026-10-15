@@ -22,7 +22,8 @@ ANTISPAM_FALLBACK_WINDOW_SECONDS = 180
 ANTISPAM_NAME_WORDS = ("bylka", "bylkas", "kindly", "ismael", "sonny")
 CHEAT_WORD_RE = re.compile(r"(?<!\w)cheat\w*(?!\w)", re.IGNORECASE)
 LVL1_ROLE_RE = re.compile(r"\blvl\s*1\b", re.IGNORECASE)
-MENTION_RE = re.compile(r"<@!?(\d+)>")
+USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 
 
 def contains_exact_phrase(content: str, phrase: str) -> bool:
@@ -33,8 +34,8 @@ def contains_exact_phrase(content: str, phrase: str) -> bool:
 
 def normalize_antispam_context(content: str) -> str:
     """Strip mentions/pings so we can compare message wording."""
-    text = MENTION_RE.sub(" ", content)
-    text = re.sub(r"<@&\d+>", " ", text)
+    text = USER_MENTION_RE.sub(" ", content)
+    text = ROLE_MENTION_RE.sub(" ", text)
     text = re.sub(r"@everyone|@here", " ", text, flags=re.IGNORECASE)
     return " ".join(text.casefold().split())
 
@@ -45,6 +46,34 @@ def has_antispam_trigger_words(content: str) -> bool:
     return CHEAT_WORD_RE.search(content) is not None
 
 
+def normalize_role_label(name: str) -> str:
+    """Keep letters/digits only so decorative Member role names still match."""
+    return re.sub(r"[^a-z0-9]+", "", name.casefold())
+
+
+def is_members_role_name(name: str) -> bool:
+    label = normalize_role_label(name)
+    return label in {"members", "member"}
+
+
+def collect_message_pings(message: discord.Message) -> frozenset[str]:
+    """Collect user + role pings (and @everyone/@here). Role pings count the same as user pings."""
+    pings: set[str] = {f"user:{user.id}" for user in message.mentions}
+    pings.update(f"role:{role.id}" for role in message.role_mentions)
+    # Raw content backup in case Discord omits some resolved mention objects.
+    pings.update(f"user:{user_id}" for user_id in USER_MENTION_RE.findall(message.content))
+    pings.update(f"role:{role_id}" for role_id in ROLE_MENTION_RE.findall(message.content))
+    if message.mention_everyone:
+        lowered = message.content.casefold()
+        if "@everyone" in lowered:
+            pings.add("everyone")
+        if "@here" in lowered:
+            pings.add("here")
+        if "@everyone" not in lowered and "@here" not in lowered:
+            pings.add("everyone")
+    return frozenset(pings)
+
+
 def is_antispam_role_target(member: discord.Member) -> bool:
     """True for lvl 1, Members-only, or Members + roles that never include 'lvl'."""
     if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
@@ -52,23 +81,23 @@ def is_antispam_role_target(member: discord.Member) -> bool:
     roles = [role for role in member.roles if not role.is_default()]
     if not roles:
         return False
-    names = [role.name.casefold() for role in roles]
     if any(LVL1_ROLE_RE.search(role.name) for role in roles):
         return True
-    if "members" not in names:
+    member_roles = [role for role in roles if is_members_role_name(role.name)]
+    if not member_roles:
         return False
-    other_names = [name for name in names if name != "members"]
-    if not other_names:
+    other_roles = [role for role in roles if not is_members_role_name(role.name)]
+    if not other_roles:
         return True
-    return not any("lvl" in name for name in other_names)
+    return not any("lvl" in role.name.casefold() for role in other_roles)
 
 
 class AutoMod(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.warn_counts: dict[int, dict[int, int]] = defaultdict(dict)
-        # guild_id -> user_id -> list[(mention_ids, context, timestamp)]
-        self._antispam_recent: dict[int, dict[int, list[tuple[frozenset[int], str, float]]]] = defaultdict(
+        # guild_id -> user_id -> list[(ping_keys, context, timestamp)]
+        self._antispam_recent: dict[int, dict[int, list[tuple[frozenset[str], str, float]]]] = defaultdict(
             lambda: defaultdict(list)
         )
 
@@ -130,13 +159,13 @@ class AutoMod(commands.Cog):
         recent = self._antispam_recent[guild_id][user_id]
         self._antispam_recent[guild_id][user_id] = [item for item in recent if item[2] >= cutoff]
 
-    def _remember_antispam_message(self, guild_id: int, user_id: int, pings: frozenset[int], context: str) -> None:
+    def _remember_antispam_message(self, guild_id: int, user_id: int, pings: frozenset[str], context: str) -> None:
         self._prune_antispam_recent(guild_id, user_id)
         recent = self._antispam_recent[guild_id][user_id]
         recent.append((pings, context, time.monotonic()))
         del recent[:-8]
 
-    def _antispam_fallback_match(self, guild_id: int, user_id: int, pings: frozenset[int], context: str) -> bool:
+    def _antispam_fallback_match(self, guild_id: int, user_id: int, pings: frozenset[str], context: str) -> bool:
         if not context:
             return False
         self._prune_antispam_recent(guild_id, user_id)
@@ -190,7 +219,7 @@ class AutoMod(commands.Cog):
         if author is None or not is_antispam_role_target(author):
             return False
 
-        pings = frozenset(user.id for user in message.mentions)
+        pings = collect_message_pings(message)
         context = normalize_antispam_context(message.content)
         multi_ping = len(pings) > 1
 
