@@ -25,6 +25,11 @@ LVL1_ROLE_RE = re.compile(r"\blvl\s*1\b", re.IGNORECASE)
 USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 
+# Soft redirect for economy ?beg used outside spam channels (no mute/timeout).
+BEG_REDIRECT_CHANNEL_ID = 1394364308183322735
+BEG_REDIRECT_RE = re.compile(r"^\s*\?beg(?![A-Za-z])", re.IGNORECASE)
+BEG_REDIRECT_REPLY = "{mention} can you please use commands in spam channels?"
+
 
 def contains_exact_phrase(content: str, phrase: str) -> bool:
     """Return True only when phrase appears as a whole word/phrase, not a substring."""
@@ -238,9 +243,43 @@ class AutoMod(commands.Cog):
             self._remember_antispam_message(message.guild.id, author.id, pings, context)
         return False
 
+    async def _redirect_beg_command(self, message: discord.Message) -> bool:
+        """Delete leading ?beg in a specific channel and ask them to use spam channels. No timeout."""
+        if message.channel.id != BEG_REDIRECT_CHANNEL_ID:
+            return False
+        if not BEG_REDIRECT_RE.match(message.content):
+            return False
+
+        try:
+            await message.delete()
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                log.warning("Rate limited while deleting a ?beg redirect message")
+            else:
+                log.warning("Could not delete ?beg redirect message: %s", exc)
+            return True
+        except discord.Forbidden:
+            log.warning("Missing permission to delete ?beg message in channel %s", message.channel.id)
+            return True
+
+        try:
+            await message.channel.send(BEG_REDIRECT_REPLY.format(mention=message.author.mention))
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                log.warning("Rate limited while sending ?beg redirect reply")
+            else:
+                log.warning("Could not send ?beg redirect reply: %s", exc)
+        except discord.Forbidden:
+            log.warning("Missing permission to send ?beg redirect reply in channel %s", message.channel.id)
+        return True
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild or not message.content: return
+
+        # Soft ?beg redirect in one channel (delete + remind, no mute).
+        if await self._redirect_beg_command(message):
+            return
 
         # Harassment antispam: role-gated, server-wide.
         if await self._check_antispam(message):
