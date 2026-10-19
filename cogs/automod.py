@@ -29,6 +29,7 @@ ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 BEG_REDIRECT_CHANNEL_ID = 1394364308183322735
 BEG_REDIRECT_RE = re.compile(r"^\s*\?beg(?![A-Za-z])", re.IGNORECASE)
 BEG_REDIRECT_REPLY = "{mention} can you please use commands in spam channels?"
+BEG_REDIRECT_TIMEOUT_MINUTES = 1
 
 
 def contains_exact_phrase(content: str, phrase: str) -> bool:
@@ -244,7 +245,7 @@ class AutoMod(commands.Cog):
         return False
 
     async def _redirect_beg_command(self, message: discord.Message) -> bool:
-        """Delete leading ?beg in a specific channel and ask them to use spam channels. No timeout."""
+        """Delete leading ?beg in a specific channel, remind them, and timeout for 1 minute."""
         if message.channel.id != BEG_REDIRECT_CHANNEL_ID:
             return False
         if not BEG_REDIRECT_RE.match(message.content):
@@ -257,10 +258,16 @@ class AutoMod(commands.Cog):
                 log.warning("Rate limited while deleting a ?beg redirect message")
             else:
                 log.warning("Could not delete ?beg redirect message: %s", exc)
-            return True
         except discord.Forbidden:
             log.warning("Missing permission to delete ?beg message in channel %s", message.channel.id)
-            return True
+
+        author = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        if author is not None:
+            await self._timeout(
+                author,
+                BEG_REDIRECT_TIMEOUT_MINUTES,
+                "Used ?beg outside spam channels",
+            )
 
         try:
             await message.channel.send(BEG_REDIRECT_REPLY.format(mention=message.author.mention))
@@ -277,7 +284,7 @@ class AutoMod(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild or not message.content: return
 
-        # Soft ?beg redirect in one channel (delete + remind, no mute).
+        # ?beg redirect in one channel (delete + 1m timeout + remind).
         if await self._redirect_beg_command(message):
             return
 
